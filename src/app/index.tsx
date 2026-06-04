@@ -1,98 +1,214 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Stack, useRouter } from 'expo-router';
+import { useSQLiteContext } from 'expo-sqlite';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+import { ComparisonChart } from '@/components/ComparisonChart';
+import { EmptyState } from '@/components/EmptyState';
+import { ProfileCard } from '@/components/ProfileCard';
+import { ProfileEditorModal, type ProfileFields } from '@/components/ProfileEditorModal';
+import { RangeSelector } from '@/components/RangeSelector';
+import { type Profile } from '@/db/profiles';
+import { getProfilesComparison, type ProfileComparison } from '@/db/stats';
+import { useProfiles } from '@/hooks/useProfiles';
+import { rangeBounds, type RangeKey } from '@/lib/ranges';
+import { colors } from '@/theme/colors';
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+export default function OverviewScreen() {
+  const router = useRouter();
+  const db = useSQLiteContext();
+  const { width } = useWindowDimensions();
+  const { overviews, loading, refresh, addProfile, editProfile, removeProfile } = useProfiles();
 
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
-  return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
+  const [editorVisible, setEditorVisible] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+
+  const [comparisonRange, setComparisonRange] = useState<RangeKey>('1M');
+  const [comparison, setComparison] = useState<ProfileComparison[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { start, end } = rangeBounds(comparisonRange);
+    getProfilesComparison(db, start, end).then((result) => {
+      if (!cancelled) setComparison(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [db, comparisonRange, overviews]);
+
+  const openCreate = useCallback(() => {
+    setEditingProfile(null);
+    setEditorVisible(true);
+  }, []);
+
+  const handleSave = useCallback(
+    async (fields: ProfileFields) => {
+      if (editingProfile) {
+        await editProfile(editingProfile.id, fields);
+      } else {
+        await addProfile(fields.name, fields.color, fields.emoji);
+      }
+      setEditorVisible(false);
+    },
+    [editingProfile, editProfile, addProfile],
   );
-}
 
-export default function HomeScreen() {
+  const handleLongPress = useCallback(
+    (profile: Profile) => {
+      Alert.alert(profile.name, undefined, [
+        {
+          text: 'Edit',
+          onPress: () => {
+            setEditingProfile(profile);
+            setEditorVisible(true);
+          },
+        },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert(
+              `Delete ${profile.name}?`,
+              'All mood entries for this profile will be deleted. This cannot be undone.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete',
+                  style: 'destructive',
+                  onPress: () => removeProfile(profile.id),
+                },
+              ],
+            );
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    },
+    [removeProfile],
+  );
+
+  const profiles = overviews.map((o) => o.profile);
+  const cardWidth = width - 32; // screen padding
+
   return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
+    <>
+      <Stack.Screen
+        options={{
+          headerRight: () => (
+            <Pressable onPress={openCreate} hitSlop={10}>
+              <Text style={styles.addButton}>＋</Text>
+            </Pressable>
+          ),
+        }}
+      />
+      <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+        {!loading && overviews.length === 0 ? (
+          <View style={styles.emptyWrap}>
+            <EmptyState
+              title="No profiles yet"
+              message="Create a profile for each person whose mood you want to track. No accounts needed — everything stays on this phone."
+            />
+            <Pressable style={styles.createButton} onPress={openCreate}>
+              <Text style={styles.createButtonText}>Create profile</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <>
+            {overviews.map((overview) => (
+              <ProfileCard
+                key={overview.profile.id}
+                overview={overview}
+                onPress={() => router.push(`/profile/${overview.profile.id}`)}
+                onLogPress={() => router.push(`/log/${overview.profile.id}`)}
+                onLongPress={() => handleLongPress(overview.profile)}
+              />
+            ))}
 
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
+            {overviews.length >= 2 ? (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Compare profiles</Text>
+                <Text style={styles.sectionSub}>Average mood per profile</Text>
+                <View style={styles.rangeWrap}>
+                  <RangeSelector value={comparisonRange} onChange={setComparisonRange} />
+                </View>
+                <ComparisonChart
+                  profiles={profiles}
+                  comparison={comparison}
+                  width={cardWidth - 28}
+                />
+              </View>
+            ) : null}
+          </>
+        )}
+      </ScrollView>
 
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
-
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
+      <ProfileEditorModal
+        visible={editorVisible}
+        profile={editingProfile}
+        onClose={() => setEditorVisible(false)}
+        onSave={handleSave}
+      />
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
   },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
+  content: {
+    padding: 16,
+    gap: 12,
+    paddingBottom: 40,
+  },
+  addButton: {
+    fontSize: 26,
+    color: colors.primary,
+    fontWeight: '600',
+    marginTop: -2,
+  },
+  emptyWrap: {
+    marginTop: 80,
     alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
+    gap: 8,
   },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
+  createButton: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 13,
+    borderRadius: 12,
   },
-  title: {
-    textAlign: 'center',
+  createButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
-  code: {
-    textTransform: 'uppercase',
+  section: {
+    backgroundColor: colors.card,
+    borderRadius: 16,
+    padding: 14,
+    marginTop: 8,
   },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  sectionSub: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    marginTop: 2,
+    marginBottom: 10,
+  },
+  rangeWrap: {
+    marginBottom: 14,
   },
 });
